@@ -1,180 +1,117 @@
 import logging
-import sqlite3
-import datetime
+import requests
+import uuid
+import json
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Твой токен
-TOKEN = "9219000330:AAFDyxqZkS1RQ3Qr3ba7WBrgwze2Hy9KwRQ"
+# --- ТВОИ КЛЮЧИ ---
+TELEGRAM_TOKEN = "9219000330:AAFDyxqZkS1RQ3Qr3ba7WBrgwze2Hy9KwRQ"
+GIGACHAT_CLIENT_ID = "01a199fb-c2f4-7823-bc77-adc5ac30dc35" # Твой Client ID
+GIGACHAT_AUTH_KEY = "MDFhMTk5ZmItYzJmNC03ODIzLWJjNzctYWRjNWFjMzBkYzM1OjY3ZmZlNGM4LWU5MDQtNGUzNy04YzZkLTEwODlhYTYxZDk2ZQ==" # Твой длинный ключ
 
-# Твой Telegram ID (нужен для команды /users)
-# Чтобы его узнать, напиши боту @userinfobot в телеграме. Он пришлет твой ID (число).
-ADMIN_ID = 8019735392 # <--- ЗАМЕНИ НА СВОЙ ID!
+# --- ХРАНИЛИЩЕ ИСТОРИИ (для контекста) ---
+# В задании просят хранить последние 5 сообщений. Мы храним в памяти.
+user_histories = {}
 
-# --- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ---
-def init_db():
-    conn = sqlite3.connect('bot.db')
-    cursor = conn.cursor()
-    # Таблица пользователей
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            registered_at TEXT
-        )
-    ''')
-    # Таблица истории команд
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            command TEXT,
-            timestamp TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        )
-    ''')
-    conn.commit()
-    conn.close()
+def get_gigachat_token():
+    """Получаем временный Access Token для GigaChat"""
+    url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+    headers = {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json',
+        'RqUID': str(uuid.uuid4()),
+        'Authorization': f'Basic {GIGACHAT_AUTH_KEY}' # Используем Authorization Key
+    }
+    payload = {'scope': 'GIGACHAT_API_PERS'}
+    
+    # Отключаем проверку SSL для тестов (у Сбера бывают проблемы с сертификатами)
+    response = requests.post(url, headers=headers, data=payload, verify=False)
+    
+    if response.status_code == 200:
+        return response.json().get('access_token')
+    else:
+        print(f"Ошибка получения токена: {response.text}")
+        return None
 
-# Функция для добавления пользователя (если его нет)
-def add_user(user):
-    conn = sqlite3.connect('bot.db')
-    cursor = conn.cursor()
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        cursor.execute('''
-            INSERT INTO users (id, username, first_name, registered_at) 
-            VALUES (?, ?, ?, ?)
-        ''', (user.id, user.username, user.first_name, now))
-        conn.commit()
-    except sqlite3.IntegrityError:
-        # Если пользователь уже есть, просто игнорируем ошибку
-        pass
-    finally:
-        conn.close()
+def ask_gigachat(user_id, message):
+    """Отправляем сообщение в GigaChat и получаем ответ"""
+    token = get_gigachat_token()
+    if not token:
+        return "Не удалось получить токен доступа. Проверь ключи."
 
-# Функция для записи команды в историю
-def log_command(user_id, command):
-    conn = sqlite3.connect('bot.db')
-    cursor = conn.cursor()
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute('''
-        INSERT INTO history (user_id, command, timestamp) 
-        VALUES (?, ?, ?)
-    ''', (user_id, command, now))
-    conn.commit()
-    conn.close()
+    url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+    headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': f'Bearer {token}'
+    }
+    
+    # Формируем историю сообщений (контекст)
+    if user_id not in user_histories:
+        user_histories[user_id] = []
+    
+    # Добавляем новое сообщение пользователя
+    user_histories[user_id].append({"role": "user", "content": message})
+    
+    # Оставляем только последние 5 сообщений (как в задании)
+    if len(user_histories[user_id]) > 5:
+        user_histories[user_id] = user_histories[user_id][-5:]
 
-# --- ОБРАБОТЧИКИ КОМАНД ---
+    payload = {
+        "model": "GigaChat",
+        "messages": user_histories[user_id],
+        "temperature": 0.7,
+        "max_tokens": 500
+    }
+
+    response = requests.post(url, headers=headers, json=payload, verify=False)
+    
+    if response.status_code == 200:
+        answer = response.json()['choices'][0]['message']['content']
+        # Добавляем ответ бота в историю
+        user_histories[user_id].append({"role": "assistant", "content": answer})
+        return answer
+    else:
+        return f"Ошибка API: {response.status_code}"
+
+# --- ОБРАБОТЧИКИ TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    add_user(update.effective_user) # Добавляем в БД
-    log_command(update.effective_user.id, "/start") # Пишем в историю
-    
     await update.message.reply_text(
-        "Привет! Я теперь умею запоминать пользователей.\n\n"
-        "Команды:\n"
-        "/stats - Общая статистика бота\n"
-        "/profile - Твоя личная статистика\n"
-        "/users - Список всех пользователей (только для админа)"
+        "Привет! Я умный бот на базе GigaChat.\n"
+        "Просто напиши мне что-нибудь, и я отвечу.\n"
+        "Команда /clear очистит историю нашего диалога."
     )
 
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    add_user(update.effective_user)
-    log_command(update.effective_user.id, "/stats")
-    
-    conn = sqlite3.connect('bot.db')
-    cursor = conn.cursor()
-    
-    # Считаем количество пользователей
-    cursor.execute("SELECT COUNT(*) FROM users")
-    users_count = cursor.fetchone()[0]
-    
-    # Считаем количество выполненных команд
-    cursor.execute("SELECT COUNT(*) FROM history")
-    commands_count = cursor.fetchone()[0]
-    
-    conn.close()
-    
-    await update.message.reply_text(
-        f"📊 Статистика бота:\n"
-        f"👥 Всего пользователей: {users_count}\n"
-        f"⚙️ Выполнено команд: {commands_count}"
-    )
+async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in user_histories:
+        user_histories[user_id] = []
+    await update.message.reply_text("🧹 История диалога очищена. Давай начнем с чистого листа!")
 
-async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    add_user(user)
-    log_command(user.id, "/profile")
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_text = update.message.text
     
-    conn = sqlite3.connect('bot.db')
-    cursor = conn.cursor()
+    # Показываем статус "печатает", пока ждем ответ от ИИ
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
-    # Получаем дату регистрации
-    cursor.execute("SELECT registered_at FROM users WHERE id = ?", (user.id,))
-    reg_date = cursor.fetchone()[0]
+    # Получаем ответ от нейросети
+    answer = ask_gigachat(user_id, user_text)
     
-    # Считаем сколько команд выполнил именно этот пользователь
-    cursor.execute("SELECT COUNT(*) FROM history WHERE user_id = ?", (user.id,))
-    my_commands = cursor.fetchone()[0]
-    
-    conn.close()
-    
-    await update.message.reply_text(
-        f"👤 Твой профиль:\n"
-        f"Имя: {user.first_name}\n"
-        f"Username: @{user.username if user.username else 'нет'}\n"
-        f"Дата регистрации: {reg_date}\n"
-        f"Выполнено команд: {my_commands}"
-    )
-
-async def users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    log_command(user.id, "/users")
-    
-    # Проверка на админа
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ У тебя нет прав для этой команды.")
-        return
-    
-    conn = sqlite3.connect('bot.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, first_name, username FROM users")
-    all_users = cursor.fetchall()
-    conn.close()
-    
-    if not all_users:
-        await update.message.reply_text("Пользователей пока нет.")
-        return
-    
-    text = "👥 Список всех пользователей:\n"
-    for u in all_users:
-        text += f"ID: {u[0]}, Имя: {u[1]}, Ник: @{u[2] if u[2] else 'нет'}\n"
-    
-    await update.message.reply_text(text)
-
-# Обработчик обычных сообщений (чтобы бот не молчал, если напишешь что-то без команды)
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    add_user(update.effective_user)
-    log_command(update.effective_user.id, update.message.text)
-    await update.message.reply_text("Я тебя услышал! Напиши /stats или /profile, чтобы проверить базу.")
+    # Отправляем пользователю
+    await update.message.reply_text(answer)
 
 def main():
-    init_db() # Создаем базу при запуске
-    
-    application = Application.builder().token(TOKEN).build()
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("stats", stats))
-    application.add_handler(CommandHandler("profile", profile))
-    application.add_handler(CommandHandler("users", users_list))
-    
-    # Ловим любой текст, чтобы записывать его в историю (для эха)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+    application.add_handler(CommandHandler("clear", clear_history))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("Бот с базой данных запущен... Нажми Ctrl+C для остановки.")
+    print("Умный бот с GigaChat запущен... Нажми Ctrl+C для остановки.")
     application.run_polling()
 
 if __name__ == '__main__':
