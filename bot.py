@@ -1,6 +1,8 @@
 import logging
 import requests
 import uuid
+import json
+import datetime
 import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -9,33 +11,35 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 # --- ТВОИ КЛЮЧИ ---
 TELEGRAM_TOKEN = "9219000330:AAFDyxqZkS1RQ3Qr3ba7WBrgwze2Hy9KwRQ"
-GIGACHAT_CLIENT_ID = "01a199fb-c2f4-7823-bc77-adc5ac30dc35"
 GIGACHAT_AUTH_KEY = "MDFhMTk5ZmItYzJmNC03ODIzLWJjNzctYWRjNWFjMzBkYzM1OjY3ZmZlNGM4LWU5MDQtNGUzNy04YzZkLTEwODlhYTYxZDk2ZQ==" # Твой длинный ключ MDF...
 
-DOCS_FILE = "docs.txt"
+# --- ИНСТРУМЕНТЫ (ФУНКЦИИ) ---
+def get_weather(city):
+    # Имитация погоды (как в задании)
+    weather_data = {
+        "москва": "Солнечно, +25°C",
+        "санкт-петербург": "Дождливо, +15°C",
+        "новосибирск": "Облачно, +10°C"
+    }
+    return weather_data.get(city.lower(), "Нет данных о погоде для этого города.")
 
-def find_relevant_context(query):
-    if not os.path.exists(DOCS_FILE):
-        return "Файл с документацией не найден."
+def get_current_time(timezone="UTC"):
+    # Получаем текущее время
+    now = datetime.datetime.now().strftime("%H:%M:%S")
+    return f"Текущее время ({timezone}): {now}"
 
-    with open(DOCS_FILE, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
+def calculate(expression):
+    try:
+        # Очень простой калькулятор (безопасный)
+        allowed_chars = "0123456789+-*/(). "
+        if not all(c in allowed_chars for c in expression):
+            return "Ошибка: недопустимые символы в выражении."
+        result = eval(expression)
+        return f"Результат: {result}"
+    except Exception as e:
+        return f"Ошибка вычисления: {e}"
 
-    # Разбиваем вопрос на слова и берем только те, что длиннее 3 букв
-    query_words = [word.strip("?,.!").lower() for word in query.split() if len(word) > 3]
-    
-    relevant_lines = []
-    for line in lines:
-        line_lower = line.lower()
-        # Ищем вхождения слов (простой поиск по подстроке)
-        if any(word in line_lower for word in query_words):
-            relevant_lines.append(line.strip())
-
-    if not relevant_lines:
-        return None
-
-    return "\n".join(relevant_lines[:3])
-
+# --- GIGACHAT ---
 def get_gigachat_token():
     url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
     headers = {
@@ -50,20 +54,22 @@ def get_gigachat_token():
         return response.json().get('access_token')
     return None
 
-def ask_gigachat_with_rag(question):
-    context = find_relevant_context(question)
-    
-    if not context:
-        return "Я не нашел информации об этом в файле docs.txt."
-
-    prompt = (
-        f"Ответь на вопрос, используя ТОЛЬКО этот текст:\n{context}\n\n"
-        f"Вопрос: {question}"
-    )
-
+def ask_gigachat_with_tools(question):
     token = get_gigachat_token()
     if not token:
         return "Ошибка токена."
+
+    # Системный промпт, который учит ИИ пользоваться инструментами
+    system_prompt = (
+        "Ты — умный ассистент с доступом к инструментам. "
+        "Если пользователь просит погоду, время или вычисления, ты ДОЛЖЕН ответить ТОЛЬКО JSON-объектом, без лишнего текста.\n"
+        "Доступные инструменты:\n"
+        "1. get_weather(city) - узнать погоду.\n"
+        "2. get_current_time(timezone) - узнать время.\n"
+        "3. calculate(expression) - вычислить математическое выражение.\n\n"
+        "Пример ответа: {\"tool\": \"get_weather\", \"args\": {\"city\": \"Москва\"}}\n"
+        "Если инструмент не нужен, просто ответь текстом."
+    )
 
     url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
     headers = {
@@ -74,36 +80,69 @@ def ask_gigachat_with_rag(question):
     
     payload = {
         "model": "GigaChat",
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": question}
+        ],
         "temperature": 0.1
     }
 
     response = requests.post(url, headers=headers, json=payload, verify=False)
     if response.status_code == 200:
-        return response.json()['choices'][0]['message']['content']
+        answer = response.json()['choices'][0]['message']['content']
+        
+        # Пытаемся распарсить JSON (если ИИ решил вызвать инструмент)
+        try:
+            # Ищем JSON в ответе (иногда ИИ добавляет лишние символы)
+            start = answer.find('{')
+            end = answer.rfind('}') + 1
+            if start != -1 and end != 0:
+                json_str = answer[start:end]
+                data = json.loads(json_str)
+                
+                tool_name = data.get("tool")
+                args = data.get("args", {})
+                
+                # ВЫПОЛНЯЕМ ИНСТРУМЕНТ
+                if tool_name == "get_weather":
+                    result = get_weather(args.get("city", ""))
+                elif tool_name == "get_current_time":
+                    result = get_current_time(args.get("timezone", "UTC"))
+                elif tool_name == "calculate":
+                    result = calculate(args.get("expression", ""))
+                else:
+                    result = "Неизвестный инструмент."
+                
+                # Возвращаем результат пользователю
+                return f"🛠 Использован инструмент: {tool_name}\nРезультат: {result}"
+            else:
+                # Если JSON не найден, просто возвращаем ответ ИИ
+                return answer
+        except json.JSONDecodeError:
+            return answer
     else:
         return "Ошибка при запросе к ИИ."
 
 # --- TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я RAG-бот. Я отвечаю на вопросы, опираясь на файл docs.txt.\n"
-        "Спроси меня что-нибудь про Python или GigaChat."
+        "Привет! Я агентный бот. Я умею:\n"
+        "🌤 Узнавать погоду (например: 'Какая погода в Москве?')\n"
+        "⏰ Говорить время (например: 'Сколько сейчас времени?')\n"
+        "🧮 Считать (например: 'Сколько будет 2+2*2?')\n"
+        "Просто напиши мне запрос!"
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    answer = ask_gigachat_with_rag(update.message.text)
-    
-    answer += "\n\n📄 *Источник: docs.txt*"
-    
-    await update.message.reply_text(answer, parse_mode='Markdown')
+    answer = ask_gigachat_with_tools(update.message.text)
+    await update.message.reply_text(answer)
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("RAG-бот запущен...")
+    print("Агентный бот запущен...")
     application.run_polling()
 
 if __name__ == '__main__':
