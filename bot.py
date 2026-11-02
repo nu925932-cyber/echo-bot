@@ -1,9 +1,8 @@
 import logging
 import requests
 import uuid
-import json
-import datetime
 import os
+import hashlib
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -13,31 +12,9 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 TELEGRAM_TOKEN = "9219000330:AAFDyxqZkS1RQ3Qr3ba7WBrgwze2Hy9KwRQ"
 GIGACHAT_AUTH_KEY = "MDFhMTk5ZmItYzJmNC03ODIzLWJjNzctYWRjNWFjMzBkYzM1OjY3ZmZlNGM4LWU5MDQtNGUzNy04YzZkLTEwODlhYTYxZDk2ZQ==" # Твой длинный ключ MDF...
 
-# --- ИНСТРУМЕНТЫ (ФУНКЦИИ) ---
-def get_weather(city):
-    # Имитация погоды (как в задании)
-    weather_data = {
-        "москва": "Солнечно, +25°C",
-        "санкт-петербург": "Дождливо, +15°C",
-        "новосибирск": "Облачно, +10°C"
-    }
-    return weather_data.get(city.lower(), "Нет данных о погоде для этого города.")
-
-def get_current_time(timezone="UTC"):
-    # Получаем текущее время
-    now = datetime.datetime.now().strftime("%H:%M:%S")
-    return f"Текущее время ({timezone}): {now}"
-
-def calculate(expression):
-    try:
-        # Очень простой калькулятор (безопасный)
-        allowed_chars = "0123456789+-*/(). "
-        if not all(c in allowed_chars for c in expression):
-            return "Ошибка: недопустимые символы в выражении."
-        result = eval(expression)
-        return f"Результат: {result}"
-    except Exception as e:
-        return f"Ошибка вычисления: {e}"
+CACHE_DIR = "image_cache"
+if not os.path.exists(CACHE_DIR):
+    os.makedirs(CACHE_DIR)
 
 # --- GIGACHAT ---
 def get_gigachat_token():
@@ -49,27 +26,23 @@ def get_gigachat_token():
         'Authorization': f'Basic {GIGACHAT_AUTH_KEY}'
     }
     payload = {'scope': 'GIGACHAT_API_PERS'}
-    response = requests.post(url, headers=headers, data=payload, verify=False)
-    if response.status_code == 200:
-        return response.json().get('access_token')
-    return None
+    try:
+        response = requests.post(url, headers=headers, data=payload, verify=False, timeout=15)
+        if response.status_code == 200:
+            return response.json().get('access_token')
+        else:
+            print(f"Ошибка токена: {response.text}")
+            return None
+    except Exception as e:
+        print(f"Ошибка соединения: {e}")
+        return None
 
-def ask_gigachat_with_tools(question):
+def analyze_sentiment(text):
     token = get_gigachat_token()
     if not token:
-        return "Ошибка токена."
+        return "Ошибка получения токена GigaChat."
 
-    # Системный промпт, который учит ИИ пользоваться инструментами
-    system_prompt = (
-        "Ты — умный ассистент с доступом к инструментам. "
-        "Если пользователь просит погоду, время или вычисления, ты ДОЛЖЕН ответить ТОЛЬКО JSON-объектом, без лишнего текста.\n"
-        "Доступные инструменты:\n"
-        "1. get_weather(city) - узнать погоду.\n"
-        "2. get_current_time(timezone) - узнать время.\n"
-        "3. calculate(expression) - вычислить математическое выражение.\n\n"
-        "Пример ответа: {\"tool\": \"get_weather\", \"args\": {\"city\": \"Москва\"}}\n"
-        "Если инструмент не нужен, просто ответь текстом."
-    )
+    prompt = f"Определи тональность текста: '{text}'. Ответь ровно одним словом: 'позитивная', 'негативная' или 'нейтральная'."
 
     url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
     headers = {
@@ -77,72 +50,81 @@ def ask_gigachat_with_tools(question):
         'Accept': 'application/json',
         'Authorization': f'Bearer {token}'
     }
-    
     payload = {
         "model": "GigaChat",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question}
-        ],
+        "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1
     }
+    try:
+        response = requests.post(url, headers=headers, json=payload, verify=False, timeout=20)
+        if response.status_code == 200:
+            return response.json()['choices'][0]['message']['content'].strip()
+        else:
+            return f"Ошибка API GigaChat: {response.status_code}"
+    except Exception as e:
+        return f"Ошибка при запросе к ИИ: {e}"
 
-    response = requests.post(url, headers=headers, json=payload, verify=False)
-    if response.status_code == 200:
-        answer = response.json()['choices'][0]['message']['content']
-        
-        # Пытаемся распарсить JSON (если ИИ решил вызвать инструмент)
-        try:
-            # Ищем JSON в ответе (иногда ИИ добавляет лишние символы)
-            start = answer.find('{')
-            end = answer.rfind('}') + 1
-            if start != -1 and end != 0:
-                json_str = answer[start:end]
-                data = json.loads(json_str)
-                
-                tool_name = data.get("tool")
-                args = data.get("args", {})
-                
-                # ВЫПОЛНЯЕМ ИНСТРУМЕНТ
-                if tool_name == "get_weather":
-                    result = get_weather(args.get("city", ""))
-                elif tool_name == "get_current_time":
-                    result = get_current_time(args.get("timezone", "UTC"))
-                elif tool_name == "calculate":
-                    result = calculate(args.get("expression", ""))
-                else:
-                    result = "Неизвестный инструмент."
-                
-                # Возвращаем результат пользователю
-                return f"🛠 Использован инструмент: {tool_name}\nРезультат: {result}"
-            else:
-                # Если JSON не найден, просто возвращаем ответ ИИ
-                return answer
-        except json.JSONDecodeError:
-            return answer
-    else:
-        return "Ошибка при запросе к ИИ."
+# --- ГЕНЕРАЦИЯ КАРТИНОК ---
+def generate_image(prompt):
+    hash_name = hashlib.md5(prompt.encode()).hexdigest()
+    file_path = os.path.join(CACHE_DIR, f"{hash_name}.jpg")
+
+    if os.path.exists(file_path):
+        return file_path, " (из кэша)"
+
+    url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(prompt)}?width=512&height=512&nologo=true"
+    try:
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            with open(file_path, 'wb') as f:
+                f.write(response.content)
+            return file_path, ""
+        else:
+            return None, "Ошибка генерации (сервис недоступен)."
+    except Exception as e:
+        return None, f"Ошибка: {e}"
 
 # --- TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я агентный бот. Я умею:\n"
-        "🌤 Узнавать погоду (например: 'Какая погода в Москве?')\n"
-        "⏰ Говорить время (например: 'Сколько сейчас времени?')\n"
-        "🧮 Считать (например: 'Сколько будет 2+2*2?')\n"
-        "Просто напиши мне запрос!"
+        "Привет! Я умею две вещи:\n"
+        "1. Анализировать тональность (просто напиши любой текст).\n"
+        "2. Генерировать картинки (используй /imagine <описание>).\n\n"
+        "Пример: /imagine кот в космосе"
     )
 
+async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Напиши описание после команды. Пример: /imagine кот в космосе")
+        return
+    
+    prompt = " ".join(context.args)
+    msg = await update.message.reply_text("🎨 Генерирую изображение... Пожалуйста, подожди.")
+    
+    file_path, cache_msg = generate_image(prompt)
+    
+    if file_path:
+        with open(file_path, 'rb') as photo:
+            await update.message.reply_photo(photo=photo, caption=f"Ваш запрос: {prompt}{cache_msg}")
+        await msg.delete()
+    else:
+        await msg.edit_text(f"Не удалось сгенерировать изображение. {cache_msg}")
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    answer = ask_gigachat_with_tools(update.message.text)
-    await update.message.reply_text(answer)
+    
+    # Получаем тональность
+    sentiment = analyze_sentiment(user_text)
+    
+    await update.message.reply_text(f"Анализ тональности: {sentiment}")
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("imagine", imagine_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("Агентный бот запущен...")
+    print("Бот запущен...")
     application.run_polling()
 
 if __name__ == '__main__':
