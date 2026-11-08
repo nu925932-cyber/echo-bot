@@ -18,13 +18,27 @@ user_histories = {}
 
 # --- ПОГОДА ---
 def get_weather(city):
-    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_KEY}&units=metric&lang=ru"
+    # Словарь для перевода популярных городов
+    city_map = {
+        "москва": "Moscow",
+        "питер": "Saint Petersburg",
+        "санкт-петербург": "Saint Petersburg",
+        "якутск": "Yakutsk",
+        "новосибирск": "Novosibirsk",
+        "екатеринбург": "Yekaterinburg",
+        "казань": "Kazan"
+    }
+    
+    # Переводим, если есть в словаре, иначе оставляем как есть
+    city_en = city_map.get(city.lower(), city)
+    
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city_en}&appid={WEATHER_KEY}&units=metric&lang=ru"
     try:
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
             return f"Погода в {city}: {data['main']['temp']}°C, {data['weather'][0]['description']}"
-        return "Город не найден."
+        return "Город не найден. Попробуй написать на английском (например, Moscow)."
     except:
         return "Ошибка погоды."
 
@@ -120,11 +134,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 3. Рисование
-    if "нарисуй" in text_lower or "картинку" in text_lower or "фото" in text_lower:
-        prompt = text.replace("нарисуй", "").replace("картинку", "").replace("фото", "").strip()
-        if not prompt: prompt = text
+        # 3. Рисование
+    if any(word in text_lower for word in ["нарисуй", "картинку", "фото", "сделай"]):
+        # Очищаем запрос от команд
+        prompt = text
+        for word in ["нарисуй", "картинку", "фото", "сделай", "пожалуйста"]:
+            prompt = prompt.replace(word, "")
+        prompt = prompt.strip()
+        
+        if not prompt: 
+            prompt = text
+        
+        # Добавляем стиль, чтобы рисовало нормально
+        full_prompt = f"{prompt}, realistic, high quality, 4k"
+        
         msg = await update.message.reply_text("🎨 Рисую...")
-        file_path, cache_msg = generate_image(prompt)
+        file_path, cache_msg = generate_image(full_prompt)
+        
         if file_path:
             with open(file_path, 'rb') as photo:
                 await update.message.reply_photo(photo=photo, caption=f"Запрос: {prompt}{cache_msg}")
