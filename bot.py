@@ -1,33 +1,21 @@
 import logging
-import subprocess
-import sys
 import requests
 import uuid
 import os
 import hashlib
-import threading
-from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-TELEGRAM_TOKEN = os.getenv("9219000330:AAFDyxqZkS1RQ3Qr3ba7WBrgwze2Hy9KwRQ")
-GIGACHAT_AUTH_KEY = os.getenv("MDFhMTk5ZmItYzJmNC03ODIzLWJjNzctYWRjNWFjMzBkYzM1OjY3ZmZlNGM4LWU5MDQtNGUzNy04YzZkLTEwODlhYTYxZDk2ZQ==")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "9219000330:AAFDyxqZkS1RQ3Qr3ba7WBrgwze2Hy9KwRQ")
+GIGACHAT_AUTH_KEY = os.getenv("GIGACHAT_AUTH_KEY", "MDFhMTk5ZmItYzJmNC03ODIzLWJjNzctYWRjNWFjMzBkYzM1OjY3ZmZlNGM4LWU5MDQtNGUzNy04YzZkLTEwODlhYTYxZDk2ZQ==")
 
 CACHE_DIR = "image_cache"
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
 
-app = Flask(__name__)
-
-@app.route('/')
-def health():
-    return "Bot is running!"
-
-def run_flask():
-    app.run(host='0.0.0.0', port=10000)
-
+# --- GIGACHAT ---
 def get_gigachat_token():
     url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
     headers = {
@@ -94,6 +82,7 @@ def generate_image(prompt):
     except Exception as e:
         return None, f"Ошибка: {e}"
 
+# --- TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! Я умею две вещи:\n"
@@ -128,11 +117,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Анализ тональности: {sentiment}")
 
 def main():
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
-    threading.Thread(target=run_flask, daemon=True).start()
-    # ...
-    threading.Thread(target=run_flask, daemon=True).start()
-    
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("imagine", imagine_command))
