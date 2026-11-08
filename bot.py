@@ -3,20 +3,29 @@ import requests
 import uuid
 import os
 import hashlib
+import threading
+from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- ТВОИ КЛЮЧИ ---
-TELEGRAM_TOKEN = "9219000330:AAFDyxqZkS1RQ3Qr3ba7WBrgwze2Hy9KwRQ"
-GIGACHAT_AUTH_KEY = "MDFhMTk5ZmItYzJmNC03ODIzLWJjNzctYWRjNWFjMzBkYzM1OjY3ZmZlNGM4LWU5MDQtNGUzNy04YzZkLTEwODlhYTYxZDk2ZQ==" # Твой длинный ключ MDF...
+TELEGRAM_TOKEN = os.getenv("9219000330:AAFDyxqZkS1RQ3Qr3ba7WBrgwze2Hy9KwRQ")
+GIGACHAT_AUTH_KEY = os.getenv("MDFhMTk5ZmItYzJmNC03ODIzLWJjNzctYWRjNWFjMzBkYzM1OjY3ZmZlNGM4LWU5MDQtNGUzNy04YzZkLTEwODlhYTYxZDk2ZQ==")
 
 CACHE_DIR = "image_cache"
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
 
-# --- GIGACHAT ---
+app = Flask(__name__)
+
+@app.route('/')
+def health():
+    return "Bot is running!"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=10000)
+
 def get_gigachat_token():
     url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
     headers = {
@@ -64,7 +73,6 @@ def analyze_sentiment(text):
     except Exception as e:
         return f"Ошибка при запросе к ИИ: {e}"
 
-# --- ГЕНЕРАЦИЯ КАРТИНОК ---
 def generate_image(prompt):
     hash_name = hashlib.md5(prompt.encode()).hexdigest()
     file_path = os.path.join(CACHE_DIR, f"{hash_name}.jpg")
@@ -84,7 +92,6 @@ def generate_image(prompt):
     except Exception as e:
         return None, f"Ошибка: {e}"
 
-# --- TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! Я умею две вещи:\n"
@@ -114,12 +121,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
-    # Получаем тональность
     sentiment = analyze_sentiment(user_text)
     
     await update.message.reply_text(f"Анализ тональности: {sentiment}")
 
 def main():
+    threading.Thread(target=run_flask, daemon=True).start()
+    
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("imagine", imagine_command))
