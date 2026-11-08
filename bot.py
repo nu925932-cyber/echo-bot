@@ -8,14 +8,14 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
+# --- КЛЮЧИ ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "9219000330:AAFDyxqZkS1RQ3Qr3ba7WBrgwze2Hy9KwRQ")
 GIGACHAT_AUTH_KEY = os.getenv("GIGACHAT_AUTH_KEY", "MDFhMTk5ZmItYzJmNC03ODIzLWJjNzctYWRjNWFjMzBkYzM1OjY3ZmZlNGM4LWU5MDQtNGUzNy04YzZkLTEwODlhYTYxZDk2ZQ==")
 
-CACHE_DIR = "image_cache"
-if not os.path.exists(CACHE_DIR):
-    os.makedirs(CACHE_DIR)
+# --- ПАМЯТЬ ДЛЯ КАЖДОГО ПОЛЬЗОВАТЕЛЯ ---
+user_histories = {}
 
-# --- GIGACHAT ---
+# --- ПОЛУЧЕНИЕ ТОКЕНА GIGACHAT ---
 def get_gigachat_token():
     url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
     headers = {
@@ -29,19 +29,26 @@ def get_gigachat_token():
         response = requests.post(url, headers=headers, data=payload, verify=False, timeout=15)
         if response.status_code == 200:
             return response.json().get('access_token')
-        else:
-            print(f"Ошибка токена: {response.text}")
-            return None
-    except Exception as e:
-        print(f"Ошибка соединения: {e}")
+        return None
+    except:
         return None
 
-def analyze_sentiment(text):
+# --- УМНЫЙ ЧАТ С ИИ ---
+def ask_gigachat(user_id, text):
     token = get_gigachat_token()
     if not token:
-        return "Ошибка получения токена GigaChat."
+        return "Ошибка токена."
 
-    prompt = f"Определи тональность текста: '{text}'. Ответь ровно одним словом: 'позитивная', 'негативная' или 'нейтральная'."
+    # Инициализируем историю для нового пользователя
+    if user_id not in user_histories:
+        user_histories[user_id] = []
+    
+    # Добавляем сообщение пользователя
+    user_histories[user_id].append({"role": "user", "content": text})
+    
+    # Оставляем только последние 5 сообщений (как в Задании 7)
+    if len(user_histories[user_id]) > 5:
+        user_histories[user_id] = user_histories[user_id][-5:]
 
     url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
     headers = {
@@ -51,21 +58,30 @@ def analyze_sentiment(text):
     }
     payload = {
         "model": "GigaChat",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1
+        "messages": user_histories[user_id],
+        "temperature": 0.7
     }
+    
     try:
         response = requests.post(url, headers=headers, json=payload, verify=False, timeout=20)
         if response.status_code == 200:
-            return response.json()['choices'][0]['message']['content'].strip()
+            answer = response.json()['choices'][0]['message']['content']
+            # Сохраняем ответ бота в историю, чтобы он помнил контекст
+            user_histories[user_id].append({"role": "assistant", "content": answer})
+            return answer
         else:
-            return f"Ошибка API GigaChat: {response.status_code}"
+            return "Ошибка API GigaChat."
     except Exception as e:
-        return f"Ошибка при запросе к ИИ: {e}"
+        return f"Ошибка: {e}"
 
+# --- ГЕНЕРАЦИЯ КАРТИНОК ---
 def generate_image(prompt):
+    cache_dir = "image_cache"
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+        
     hash_name = hashlib.md5(prompt.encode()).hexdigest()
-    file_path = os.path.join(CACHE_DIR, f"{hash_name}.jpg")
+    file_path = os.path.join(cache_dir, f"{hash_name}.jpg")
 
     if os.path.exists(file_path):
         return file_path, " (из кэша)"
@@ -77,19 +93,22 @@ def generate_image(prompt):
             with open(file_path, 'wb') as f:
                 f.write(response.content)
             return file_path, ""
-        else:
-            return None, "Ошибка генерации (сервис недоступен)."
-    except Exception as e:
-        return None, f"Ошибка: {e}"
+        return None, "Ошибка генерации."
+    except:
+        return None, "Ошибка соединения."
 
-# --- TELEGRAM ---
+# --- ОБРАБОТЧИКИ TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я умею две вещи:\n"
-        "1. Анализировать тональность (просто напиши любой текст).\n"
-        "2. Генерировать картинки (используй /imagine <описание>).\n\n"
-        "Пример: /imagine кот в космосе"
+        "Привет! Теперь я полноценный ИИ-бот. Пиши мне что угодно, и я отвечу как GigaChat.\n"
+        "А если хочешь картинку — используй /imagine <описание>."
     )
+
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in user_histories:
+        user_histories[user_id] = []
+    await update.message.reply_text("🧹 История диалога очищена.")
 
 async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -109,19 +128,26 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"Не удалось сгенерировать изображение. {cache_msg}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     user_text = update.message.text
+    
+    # Показываем статус "печатает"
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
-    sentiment = analyze_sentiment(user_text)
+    # Отправляем в GigaChat
+    answer = ask_gigachat(user_id, user_text)
     
-    await update.message.reply_text(f"Анализ тональности: {sentiment}")
+    await update.message.reply_text(answer)
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
+
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("clear", clear_command))
     application.add_handler(CommandHandler("imagine", imagine_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("Бот запущен...")
+
+    print("Умный ИИ-бот запущен...")
     application.run_polling()
 
 if __name__ == '__main__':
