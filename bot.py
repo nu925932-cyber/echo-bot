@@ -1,4 +1,6 @@
 import logging
+import subprocess
+import sys
 import requests
 import uuid
 import os
@@ -126,6 +128,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Анализ тональности: {sentiment}")
 
 def main():
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
+    threading.Thread(target=run_flask, daemon=True).start()
+    # ...
     threading.Thread(target=run_flask, daemon=True).start()
     
     application = Application.builder().token(TELEGRAM_TOKEN).build()
